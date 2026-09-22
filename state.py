@@ -40,6 +40,7 @@ class AgentState(TypedDict):
     consent_status: Optional[str]     # pending | approved | timeout | denied
     consent_polls: int
     unauthorized_turns: int           # how often we have explained the dead end
+    bad_attempts: int                 # details given that did not match
 
     # --- parked memory ---
     # Written from ANY phase. Callers state why they are calling long before
@@ -53,6 +54,11 @@ class AgentState(TypedDict):
     discussed: list              # intents covered, for the closing summary
     offtopic: bool               # turn-scoped: this message is out of scope
     offtopic_strikes: int        # consecutive off-topic turns
+
+    # --- how the call is going ---
+    emotion: Optional[str]
+    refusing: bool
+    friction: int                # consecutive difficult turns behind a gate
 
     # --- closing ---
     wrap_up: bool                # turn-scoped: caller signalled they are done
@@ -113,6 +119,22 @@ class Caller(BaseModel):
     )
 
 
+class Mood(BaseModel):
+    """How the caller sounds. Read from their words, not assumed."""
+
+    emotion: Optional[Literal["calm", "frustrated", "angry", "anxious",
+                              "confused", "upset"]] = Field(
+        None, description="The caller's tone in this message. 'calm' when "
+        "neutral or businesslike. Judge from what they wrote, not from the "
+        "topic being serious."
+    )
+    refusing: Optional[bool] = Field(
+        None, description="True if they decline to give something asked for - "
+        "'I'm not giving you my SSN', 'why do you need that', 'I already told "
+        "you'. Not true merely because they are annoyed."
+    )
+
+
 class Closing(BaseModel):
     """Signals about ending the call, extracted from the latest message."""
 
@@ -122,9 +144,12 @@ class Closing(BaseModel):
         "questions'. A new question is not a wrap-up."
     )
     wants_human: Optional[bool] = Field(
-        None, description="True if the caller asks to speak to a person - "
-        "'transfer me', 'I want a human', 'get me an agent', 'connect me'. "
-        "Not true merely because they are frustrated."
+        None, description="True ONLY if the caller explicitly asks to be "
+        "connected to a person: 'transfer me', 'let me speak to someone', "
+        "'get me an agent', 'I want a human'. Anger, insults, or demands "
+        "about the claim itself - 'just approve it', 'pass my claim', 'this "
+        "is ridiculous' - are NOT a request for a person. When in doubt, "
+        "false."
     )
     email_choice: Optional[Literal["send", "skip"]] = Field(
         None, description="Only when an emailed summary has been offered. "
@@ -137,8 +162,12 @@ class Request(BaseModel):
     """What the caller wants, and which claim they mean."""
 
     intent: Optional[INTENTS] = Field(
-        None, description="What the caller wants. 'out_of_scope' for anything "
-        "unrelated to insurance claims. 'none' if they stated no request."
+        None, description="What the caller wants. 'next_steps' for 'what now', "
+        "'what do I do', 'what happens next', 'what should I be doing'. "
+        "'document_submission' for how or where to send something. "
+        "'denial_question' for why a claim was refused. 'status_inquiry' for "
+        "where a claim stands. 'out_of_scope' for anything unrelated to "
+        "insurance claims. 'none' if they stated no request."
     )
     case_id: Optional[str] = Field(
         None, description="Claim id if spoken, e.g. CL-2048."
@@ -174,4 +203,5 @@ class Extraction(BaseModel):
     identity: Identity = Field(default_factory=Identity)
     caller: Caller = Field(default_factory=Caller)
     request: Request = Field(default_factory=Request)
+    mood: Mood = Field(default_factory=Mood)
     closing: Closing = Field(default_factory=Closing)

@@ -29,9 +29,75 @@ MAX_UNAUTHORIZED_TURNS = 2
 MAX_OFFTOPIC_STRIKES = 2
 
 
-# A caller who keeps missing on identity details is either mistaken or
-# probing. Either way, stop looping and hand them to a person.
-MAX_MISMATCHES = 2
+# Wrong answers, counted across the call. Past this, stop looping and hand
+# the caller to a person rather than fishing for a detail that works.
+MAX_BAD_ATTEMPTS = 3
+
+
+# Past this many difficult turns in a row, stop persuading and offer a person.
+MAX_FRICTION = 3
+
+
+def mood_note(state, cleared):
+    """De-escalation guidance, prepended to whatever brief applies.
+
+    This only changes how the agent speaks and what it offers. It never
+    changes what the caller is allowed to have -- the brief underneath is
+    unchanged, so an angry caller behind a gate is still behind it.
+    """
+    emotion = state.get("emotion") or "calm"
+    refusing = state.get("refusing")
+    friction = state.get("friction", 0)
+
+    if emotion == "calm" and not refusing:
+        return ""
+
+    parts = ["HOW THIS CALL IS GOING."]
+
+    if emotion == "confused":
+        parts.append(
+            "The caller sounds confused. Slow down, say the one thing you need "
+            "in plain words, and ask for a single detail rather than a list."
+        )
+    elif emotion == "anxious":
+        parts.append(
+            "The caller sounds worried. Reassure them briefly and concretely "
+            "about what happens next before asking anything."
+        )
+    elif emotion in ("frustrated", "angry", "upset"):
+        parts.append(
+            "The caller is upset. Acknowledge that first, in your own words and "
+            "without a scripted apology, before anything else. Do not defend "
+            "the process or explain the rules at length."
+        )
+
+    if refusing:
+        parts.append(
+            "They are declining what was asked. Say in one plain sentence WHY "
+            "the step exists - it is how we keep someone else from getting at "
+            "their claim - then offer the alternatives listed below. Never "
+            "imply they must give the specific detail they refused."
+        )
+
+    if friction >= 2 and not cleared:
+        parts.append(
+            "This has now been difficult for several turns. Explain the "
+            "requirement once more, briefly, and offer a human representative "
+            "as a real option rather than a last resort."
+        )
+
+    if friction > MAX_FRICTION:
+        parts.append(
+            "STOP PERSUADING. Do not ask for anything further. Say warmly that "
+            "you are not able to get them through this on the automated line, "
+            "and offer to pass them to a claims representative now."
+        )
+
+    parts.append(
+        "None of this changes what you may disclose. The rules below still "
+        "apply exactly as written."
+    )
+    return "\n".join(parts) + "\n\n"
 
 
 def handoff_brief(state):
@@ -85,6 +151,7 @@ def identity_brief(state):
         if state.get("unauthorized_turns", 0) > MAX_UNAUTHORIZED_TURNS:
             return (
                 "PHASE: identity verification.\n"
+                "Claim details stay protected. "
                 "This caller is not an authorised representative and has now been "
                 "told more than once. Stop explaining. Say plainly that you cannot "
                 "continue on this call, that the policyholder needs to add them to "
@@ -125,12 +192,26 @@ def identity_brief(state):
     matched = gate.get("matched", [])
     still_needed = gate.get("still_needed", [])
     mismatched = gate.get("mismatched", [])
-    options = ", ".join(FIELD_LABELS[f] for f in still_needed if f in FIELD_LABELS)
+    # A detail that already failed is not worth asking for again -- it just
+    # invites the same wrong answer. Offer the untried ones.
+    untried = [f for f in still_needed if f not in mismatched]
+    options = ", ".join(FIELD_LABELS[f] for f in (untried or still_needed)
+                        if f in FIELD_LABELS)
 
-    if len(mismatched) > MAX_MISMATCHES:
+    header = (
+        "PHASE: identity verification.\n"
+        "VERIFICATION IS NOT COMPLETE. Never tell the caller they are "
+        "verified, confirmed, or all set, and never say a detail they gave was "
+        "accepted.\n"
+        "If they ask about a claim, say those details are protected until the "
+        "check is finished, then ask for the next detail. Do not offer a "
+        "transfer unless told to below.\n"
+    )
+
+    if state.get("bad_attempts", 0) > MAX_BAD_ATTEMPTS:
         return (
-            "PHASE: identity verification.\n"
-            "Several of the details given do not match the policy. Stop asking. "
+            header
+            + "Several of the details given do not match the policy. Stop asking. "
             "Say warmly that you have not been able to complete verification on "
             "this call and offer to pass them to a claims representative who can "
             "help another way. Do NOT say which details were wrong, and do not "
@@ -151,9 +232,9 @@ def identity_brief(state):
         if state.get("caller_role") == "representative" else ""
     )
     return (
-        f"PHASE: identity verification.\n"
-        f"{on_behalf}"
-        f"{miss_note}"
+        header
+        + f"{on_behalf}"
+        + f"{miss_note}"
         f"Confirmed {len(matched)} of {identity.REQUIRED} details. "
         f"{identity.REQUIRED - len(matched)} more needed.\n"
         f"Ask for ONE of these, caller's choice: {options}. Do not ask for a "
@@ -180,12 +261,17 @@ def choose_claim_brief(ground):
         for c in options
     )
     return (
-        f"PHASE: choosing a claim.\n"
+        "PHASE: choosing a claim.\n"
         "Identity is already confirmed. Do not ask for any identity details.\n"
         f"These claims match what they have told us so far: {listed}.\n"
         "Ask which one they mean. Describe them by type, status and month -- do "
         "not read out claim id numbers unless the caller used one. State nothing "
-        "about these claims beyond what is listed here."
+        "about these claims beyond what is listed here.\n"
+        "If they have already asked a question about a claim, you are not "
+        "refusing it and nothing is missing from your records -- you simply do "
+        "not know yet WHICH claim they mean. Say that, list the options, and "
+        "answer as soon as they pick one. Never say the information is "
+        "unavailable, and do not offer a transfer."
     )
 
 
@@ -237,7 +323,10 @@ def process_brief(ground):
         lines += [f"  - {b}" for b in ground["submission_basics"]]
 
     if ground.get("fallback"):
-        lines += ["", f"No specific rule covers this. Say: {ground['fallback']}"]
+        lines += ["", "No specific rule covers this question. Convey the "
+                      "substance of the following in your own words. Do not "
+                      "mention rules, notes, or what you can or cannot see:",
+                  f"  {ground['fallback']}"]
 
     lines += ["", "Answer the question asked. Do not recite every fact above, "
                   "and do not volunteer amounts, deadlines or document rules "

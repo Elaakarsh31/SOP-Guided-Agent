@@ -16,7 +16,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
 
 from graph import GREETING, build_graph, initial_state
-from nodes import CURRENT_KEY, MissingKey
+from nodes import CURRENT_KEY
 
 STATIC = Path(__file__).parent / "static"
 
@@ -65,6 +65,9 @@ def public_state(values):
         "case_id": values.get("case_id"),
         "discussed": values.get("discussed") or [],
         "offtopic_strikes": values.get("offtopic_strikes", 0),
+        "emotion": values.get("emotion"),
+        "refusing": values.get("refusing"),
+        "friction": values.get("friction", 0),
         "email_offered": values.get("email_offered"),
         "email_choice": values.get("email_choice"),
         "email_sent": values.get("email_sent"),
@@ -97,7 +100,7 @@ def chat(req: ChatRequest):
     token = CURRENT_KEY.set((req.api_key or "").strip() or None)
     try:
         out = agent.invoke({"messages": [HumanMessage(req.message)]}, cfg)
-    except MissingKey as exc:
+    except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:
         # Rate limits and malformed model responses should not take the
@@ -108,7 +111,6 @@ def chat(req: ChatRequest):
 
     return {
         "reply": out["messages"][-1].content,
-        "key_source": "yours" if (req.api_key or "").strip() else "server",
         "state": public_state(agent.get_state(cfg).values),
     }
 

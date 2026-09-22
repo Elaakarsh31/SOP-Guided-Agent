@@ -312,6 +312,12 @@ function draw(s) {
   row(dl, "Asking about", s.intent);
   row(dl, "Covered", s.discussed);
   if (s.offtopic_strikes) row(dl, "Off topic", s.offtopic_strikes + " in a row");
+  if (s.emotion && s.emotion !== "calm" || s.refusing || s.friction) {
+    row(dl, "Caller mood",
+        [s.emotion, s.refusing ? "declining" : null,
+         s.friction ? s.friction + " hard turns" : null]
+        .filter(Boolean).join(" · "));
+  }
   if (s.email_offered) {
     row(dl, "Summary email", s.email_sent ? "sent"
       : s.email_choice === "skip" ? "declined" : "offered");
@@ -362,8 +368,6 @@ $("form").addEventListener("submit", async ev => {
       api_key: $("key").value.trim() || null,
     });
     turn("agent", d.reply);
-    $("keynote").textContent = d.key_source === "yours" ? "using your key" : "using the server key";
-    $("keynote").style.color = "";
     draw(d.state);
   } catch (e) {
     turn("agent", e.message, "err");

@@ -1,11 +1,9 @@
-langchain_community
-langchain_google_genai
-langchain_openai
-langchain_chroma
-langgraph
-pydantic
-pypdf
-pyyaml
+langgraph>=0.2
+langchain-core>=0.3
+langchain-google-genai>=2.0
+pydantic>=2.7
+python-dotenv>=1.0
 PyYAML>=6.0
 fastapi>=0.110
 uvicorn[standard]>=0.29
+typing-extensions>=4.9

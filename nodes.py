@@ -1,3 +1,9 @@
+"""The graph nodes, one function per step of the SOP.
+
+Only extract() and respond() call a model. Identity scoring, consent,
+claim selection and grounding are all plain Python.
+"""
+
 import contextvars
 import os
 from pathlib import Path
@@ -17,23 +23,33 @@ from state import AgentState, Extraction
 
 load_dotenv()
 
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-MODEL = os.getenv("SOP_MODEL", "gemini-3.5-flash-lite")
+MODEL = os.getenv("SOP_MODEL", DEFAULT_MODEL)
 
-# Set per request by the server when a user supplies their own key in the UI.
+# Set per request by the server when a tester supplies their own key.
 CURRENT_KEY = contextvars.ContextVar("current_api_key", default=None)
 
 _clients = {}
 
 
 def llm(structured=False):
-    key = CURRENT_KEY.get() or GEMINI_API_KEY
-    if not key:
+    """The Gemini client for the key in play, built once per key.
+
+    structured=True returns a client that parses its reply into Extraction.
+    """
+    api_key = CURRENT_KEY.get() or GEMINI_API_KEY
+    if not api_key:
         raise ValueError("No API key. Set GEMINI_API_KEY or paste one in the UI.")
-    if key not in _clients:
-        chat = ChatGoogleGenerativeAI(model=MODEL, api_key=key, thinking_budget=128)
-        _clients[key] = (chat, chat.with_structured_output(Extraction))
-    return _clients[key][1 if structured else 0]
+
+    if api_key not in _clients:
+        chat = ChatGoogleGenerativeAI(
+            model=MODEL, api_key=api_key, thinking_budget=128)
+        _clients[api_key] = {
+            False: chat,
+            True: chat.with_structured_output(Extraction),
+        }
+    return _clients[api_key][structured]
 
 
 PROMPTS = yaml.safe_load((Path(__file__).parent / "prompts.yaml").read_text())
@@ -41,9 +57,11 @@ EXTRACT_PROMPT = PROMPTS["extract"]
 RESPOND_PROMPT = PROMPTS["respond"]
 
 DIFFICULT = ("frustrated", "angry", "upset")
-# Cleared when the caller moves to a different claim. intent is in here
-# because what they wanted about the last claim says nothing about this one.
+
+# Hints dropped when the caller moves to a different claim.
 NARROWING_HINTS = ("case_id", "case_type", "status", "period", "intent")
+
+FALLBACK_REPLY = "Sorry, I lost that for a second. Could you say that again?"
 
 
 def _extract_context(state):
@@ -72,10 +90,10 @@ def _extract_context(state):
 
 
 def extract(state: AgentState) -> dict:
-    """Read the latest message into state. Runs in every phase.
+    """Read the latest message into state.
 
-    Callers say why they are calling long before they are verified, so this
-    has to capture intent and case hints during VERIFY_ID too.
+    Runs in every phase, including verification, because callers explain
+    what they want long before they are through the gate.
     """
     prompt = EXTRACT_PROMPT + _extract_context(state)
     try:
@@ -83,10 +101,10 @@ def extract(state: AgentState) -> dict:
             [SystemMessage(content=prompt), *state["messages"][-3:]]
         ).model_dump()
     except ValueError:
+        # A missing API key is a configuration fault; let the server report it.
         raise
     except Exception:
-        # Rate limits and malformed responses leave state untouched rather
-        # than taking the turn down.
+        # Rate limits and malformed replies leave state untouched.
         return {}
 
     identity_fields = result["identity"]
@@ -95,24 +113,19 @@ def extract(state: AgentState) -> dict:
     mood = result["mood"]
     closing = result["closing"]
 
-    # A field that already matched the pinned party is settled. Nothing later
-    # may overwrite it and flip verification back off.
+    # A field that already matched is settled and cannot be overwritten.
     locked = set((state.get("gate") or {}).get("matched", []))
     claimed = dict(state.get("claimed") or {})
     for field, value in identity_fields.items():
         if value not in (None, "") and field not in locked:
             claimed[field] = value
 
-    # The model's flag catches "actually a different one". The contradiction
-    # check catches "tell me about my auto claim", where nothing in the
-    # wording says switch but the named type is not the pinned claim's.
+    # The flag catches an explicit switch, contradicts() an implicit one.
     switching = bool(req.get("switch_case")) or claims.contradicts(
         req, state.get("case_id"))
 
     hints = dict(state.get("hints") or {})
     if switching:
-        # Clear the old filters before merging this turn's, or "the auto one"
-        # still carries the last claim's status and selects it again.
         for key in NARROWING_HINTS:
             hints.pop(key, None)
 
@@ -134,12 +147,9 @@ def extract(state: AgentState) -> dict:
         "refusing": refusing,
         "offtopic": offtopic,
         "wrap_up": bool(closing.get("wrap_up")),
-        # Counters track consecutive turns and reset on a good one, so an
-        # isolated aside or sharp remark does not build toward a transfer.
+        # Consecutive counts, reset by a good turn.
         "friction": state.get("friction", 0) + 1 if difficult else 0,
         "offtopic_strikes": state.get("offtopic_strikes", 0) + 1 if offtopic else 0,
-        # Deliberately not sticky. A wrong read here would otherwise end the
-        # call for good, and the handoff brief already avoids repeating itself.
         "wants_human": bool(closing.get("wants_human")),
     }
 
@@ -149,7 +159,7 @@ def extract(state: AgentState) -> dict:
     if closing.get("email_choice") and state.get("email_offered"):
         out["email_choice"] = closing["email_choice"]
 
-    # Only write when present, so a later "yes I'll hold" cannot blank the role.
+    # Written only when present, so a later turn cannot blank out the role.
     for field in ("caller_role", "rep_name"):
         if caller.get(field) not in (None, ""):
             out[field] = caller[field]
@@ -158,15 +168,14 @@ def extract(state: AgentState) -> dict:
 
 
 def verify(state: AgentState) -> dict:
-    """Identity and authorization are separate gates. Both must pass."""
+    """Score identity, then authorisation. A representative needs both."""
     if state["phase"] != "VERIFY_ID":
         return {}
 
     gate = identity.check(state.get("claimed") or {}, state.get("party_id"))
     out = {"gate": gate, "party_id": gate["party_id"], "verified": gate["verified"]}
 
-    # Count new wrong answers, not fields currently wrong. A caller who
-    # corrects a typo should not be charged twice for the same field.
+    # Count newly wrong answers, so correcting a typo is not charged twice.
     previously_wrong = set((state.get("gate") or {}).get("mismatched", []))
     out["bad_attempts"] = state.get("bad_attempts", 0) + len(
         set(gate["mismatched"]) - previously_wrong)
@@ -177,10 +186,8 @@ def verify(state: AgentState) -> dict:
     if state.get("caller_role") != "representative":
         return {**out, "phase": "RESOLVE_INTENT"}
 
-    # Knowing the policyholder's details is not authorization.
     record = consent.authorized(state.get("rep_name"), gate["party_id"])
     if not record:
-        # Consent is never asked for here, so consent_status stays untouched.
         return {
             **out,
             "phase": "VERIFY_ID",
@@ -197,12 +204,11 @@ def verify(state: AgentState) -> dict:
         consent_status=status,
     )
 
-    # Only the exact string 'approved' opens the gate.
     return {**out, "phase": "RESOLVE_INTENT" if status == "approved" else "VERIFY_ID"}
 
 
 def resolve_intent(state: AgentState) -> dict:
-    """Decide which claim the caller means from whatever they have said."""
+    """Pin the claim the caller means, or hand back a shortlist to choose from."""
     hints = state.get("hints") or {}
     matches, used = claims.find(state["party_id"], hints)
 
@@ -236,11 +242,7 @@ def resolve_intent(state: AgentState) -> dict:
 
 
 def process_case(state: AgentState) -> dict:
-    """Collect the facts and guidance the agent may use for this question.
-
-    Nothing here is generated. The claim row is filtered by intent and the
-    guidance text comes out of the fixture with the placeholders filled in.
-    """
+    """Collect the facts and approved wording for the question just asked."""
     claim = claims.get(state.get("case_id"))
     if not claim:
         return {"phase": "RESOLVE_INTENT", "case_id": None, "grounding": {}}
@@ -248,8 +250,7 @@ def process_case(state: AgentState) -> dict:
     text = state["messages"][-1].content if state["messages"] else ""
     hints = state.get("hints") or {}
 
-    # The latest question decides the intent, not whatever the caller wanted
-    # when the claim was first pinned.
+    # The latest question sets the intent, not the one the claim was pinned on.
     intent = hints.get("intent") or state.get("intent") or "general_claim_question"
 
     ground = {"facts": guidance.claim_facts(claim, intent, text), "intent": intent}
@@ -278,27 +279,8 @@ def process_case(state: AgentState) -> dict:
     }
 
 
-def summary_text(payload):
-    """The emailed body. Built from the payload, not written by the model."""
-    lines = [
-        f"Summary of your call about claim {payload['case_id']}",
-        "",
-        f"Claim: {payload['case_id']} ({payload['case_type']}, "
-        f"filed {payload['filed']})",
-        f"Status: {payload['status']}",
-        f"Outcome: {payload['outcome']}",
-        "",
-        "What we discussed: " + ", ".join(payload["discussed"]),
-    ]
-    if payload.get("next_steps"):
-        lines += ["", "Next steps:"] + [f"  - {s}" for s in payload["next_steps"]]
-    if payload.get("spoke_with"):
-        lines += ["", f"Call handled with {payload['spoke_with']} on your behalf."]
-    return "\n".join(lines)
-
-
 def post_process(state: AgentState) -> dict:
-    """Offer an emailed summary, then do whatever the caller chose."""
+    """Offer an emailed summary, then act on whichever answer comes back."""
     payload = summary.build(state)
     if not payload:
         return {"phase": "POST_PROCESS", "closed": True,
@@ -311,7 +293,7 @@ def post_process(state: AgentState) -> dict:
                 "grounding": {"closing": True, "email": "skipped"}}
 
     if choice == "send" and not state.get("email_sent"):
-        receipt = summary.send(payload, summary_text(payload))
+        receipt = summary.send(payload, summary.email_body(payload))
         return {
             "phase": "POST_PROCESS",
             "email_sent": True,
@@ -328,6 +310,7 @@ def post_process(state: AgentState) -> dict:
 
 
 def _brief_for(state, ground, cleared):
+    """Choose this turn's brief. Order matters: the exits come first."""
     if state.get("wants_human"):
         return briefs.handoff_brief(state)
     if state.get("offtopic"):
@@ -343,15 +326,20 @@ def _brief_for(state, ground, cleared):
     return briefs.claim_picked_brief(ground)
 
 
-def respond(state: AgentState) -> dict:
-    """The only node that produces text the caller sees.
+def _complete(messages):
+    """One model call, trimmed. Empty string if it returns nothing."""
+    return (llm().invoke(messages).text or "").strip()
 
-    It works from the brief it is handed and never reads the fixtures, so
-    anything it cannot be told, it cannot leak.
+
+def respond(state: AgentState) -> dict:
+    """The one node that produces text the caller sees.
+
+    It works from the brief it is handed and never reads a fixture, so a
+    fact no brief mentions cannot be leaked here.
     """
     ground = state.get("grounding") or {}
 
-    # Identity alone is not clearance. A representative also needs consent.
+    # A representative needs approved consent on top of identity.
     cleared = state["verified"] and (
         state.get("caller_role") != "representative"
         or state.get("consent_status") == "approved"
@@ -361,7 +349,6 @@ def respond(state: AgentState) -> dict:
     if cleared and state.get("caller_role") == "representative":
         brief += briefs.representative_note(state)
 
-    # Tone guidance goes in front of the rules, never in place of them.
     brief = briefs.mood_note(state, cleared) + brief
 
     messages = [
@@ -370,10 +357,6 @@ def respond(state: AgentState) -> dict:
         SystemMessage(content=f"[internal, not visible to caller]\n{brief}"),
     ]
 
-    text = (llm().invoke(messages).text or "").strip()
-    if not text:
-        text = (llm().invoke(messages).text or "").strip()
-    if not text:
-        text = "Sorry, I lost that for a second. Could you say that again?"
-
+    # An empty completion usually clears on a second attempt.
+    text = _complete(messages) or _complete(messages) or FALLBACK_REPLY
     return {"messages": [AIMessage(content=text)]}

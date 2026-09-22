@@ -1,16 +1,13 @@
 """Per-turn instructions for the responder.
 
-A brief is what the agent is allowed to say this turn, assembled from state
-and grounding. Nothing here calls a model or reads a fixture -- the nodes
-have already decided what is permitted, and this file only phrases that
-decision for the responder.
-
-Keeping it separate means the leak surface is one file: if a fact is not
-written into a brief, the agent cannot state it.
+A brief spells out what the agent may say on this turn, putting the whole
+disclosure surface in one file. Nothing here calls a model or opens a
+fixture; the nodes have already decided what is permitted.
 """
 
 import identity
 
+# How each verification field is described down a phone line.
 FIELD_LABELS = {
     "full_name": "full name",
     "dob": "date of birth",
@@ -19,31 +16,17 @@ FIELD_LABELS = {
     "id_last4": "last four digits of your SSN or national ID",
 }
 
-# After this many turns of explaining the same dead end, stop persuading
-# and hand the caller to a human.
-MAX_UNAUTHORIZED_TURNS = 2
-
-
-# After this many consecutive off-topic turns, stop redirecting and offer
-# a human representative.
-MAX_OFFTOPIC_STRIKES = 2
-
-
-# Wrong answers, counted across the call. Past this, stop looping and hand
-# the caller to a person rather than fishing for a detail that works.
-MAX_BAD_ATTEMPTS = 3
-
-
-# Past this many difficult turns in a row, stop persuading and offer a person.
-MAX_FRICTION = 3
+# Patience limits: past each one, stop persuading and offer a person.
+MAX_UNAUTHORIZED_TURNS = 2   # times we explain the same dead end
+MAX_OFFTOPIC_STRIKES = 2     # consecutive unrelated questions
+MAX_BAD_ATTEMPTS = 3         # wrong details, across the whole call
+MAX_FRICTION = 3             # consecutive difficult turns
 
 
 def mood_note(state, cleared):
     """De-escalation guidance, prepended to whatever brief applies.
 
-    This only changes how the agent speaks and what it offers. It never
-    changes what the caller is allowed to have -- the brief underneath is
-    unchanged, so an angry caller behind a gate is still behind it.
+    Changes how the agent speaks, never what the caller may have.
     """
     emotion = state.get("emotion") or "calm"
     refusing = state.get("refusing")
@@ -101,7 +84,7 @@ def mood_note(state, cleared):
 
 
 def handoff_brief(state):
-    """The caller asked for a person. The automated call is over."""
+    """The caller asked for a person, so the automated call is over."""
     return (
         "PHASE: handing over.\n"
         "The caller has asked to speak to a person. Tell them once, in one or "
@@ -145,8 +128,7 @@ def identity_brief(state):
     """What to say while the caller is still behind the gate."""
     status = state.get("consent_status")
 
-    # 'is False' on purpose: None means not a representative at all, which is
-    # a different situation from being refused.
+    # 'is False' on purpose: None means not a representative at all.
     if state.get("authorized") is False:
         if state.get("unauthorized_turns", 0) > MAX_UNAUTHORIZED_TURNS:
             return (
@@ -192,8 +174,7 @@ def identity_brief(state):
     matched = gate.get("matched", [])
     still_needed = gate.get("still_needed", [])
     mismatched = gate.get("mismatched", [])
-    # A detail that already failed is not worth asking for again -- it just
-    # invites the same wrong answer. Offer the untried ones.
+    # Asking again for a detail that already failed invites the same answer.
     untried = [f for f in still_needed if f not in mismatched]
     options = ", ".join(FIELD_LABELS[f] for f in (untried or still_needed)
                         if f in FIELD_LABELS)
@@ -233,9 +214,9 @@ def identity_brief(state):
     )
     return (
         header
-        + f"{on_behalf}"
-        + f"{miss_note}"
-        f"Confirmed {len(matched)} of {identity.REQUIRED} details. "
+        + on_behalf
+        + miss_note
+        + f"Confirmed {len(matched)} of {identity.REQUIRED} details. "
         f"{identity.REQUIRED - len(matched)} more needed.\n"
         f"Ask for ONE of these, caller's choice: {options}. Do not ask for a "
         "detail they have already given this call unless they offer to "
@@ -256,6 +237,7 @@ def choose_claim_brief(ground):
             "offer a human representative. Do not say you will check again."
         )
 
+    # Ids let the agent recognise one quoted back; the brief forbids reading them out.
     listed = "; ".join(
         f"{c['case_id']} ({c['case_type']}, {c['status']}, filed {c['created_at']})"
         for c in options
@@ -276,7 +258,7 @@ def choose_claim_brief(ground):
 
 
 def claim_picked_brief(ground):
-    """The turn right after a claim is pinned, before any question about it."""
+    """A claim is pinned but nothing has been asked about it yet."""
     return (
         "PHASE: working the claim.\n"
         "Identity is already confirmed. Do not ask for any identity details.\n"
@@ -383,7 +365,7 @@ def closing_brief(state, ground):
 
 
 def representative_note(state):
-    """Appended once the caller is cleared and is not the policyholder."""
+    """Appended once a representative is cleared, so the pronouns come out right."""
     return (
         f"\nYou are speaking with {state.get('rep_name')}, the policyholder's "
         f"{state.get('relationship') or 'representative'}, not the policyholder. "

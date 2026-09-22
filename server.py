@@ -1,8 +1,8 @@
 """HTTP wrapper around the SOP agent.
 
-Sessions are LangGraph threads. The checkpointer already persists state per
-thread_id, so there is no session store here -- the browser supplies an id
-and the graph loads whatever that call had.
+A session is a LangGraph thread. The checkpointer already persists state
+per thread_id, so there is no session store in here: the browser sends an
+id back and the graph reloads whatever that call had.
 """
 
 import os
@@ -16,7 +16,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
 
 from graph import GREETING, build_graph, initial_state
-from nodes import CURRENT_KEY
+from nodes import CURRENT_KEY, DEFAULT_MODEL
 
 STATIC = Path(__file__).parent / "static"
 
@@ -25,6 +25,7 @@ agent = build_graph()
 
 
 def thread(session_id):
+    """The LangGraph config that selects one caller's conversation."""
     return {"configurable": {"thread_id": session_id}}
 
 
@@ -36,15 +37,15 @@ class StartResponse(BaseModel):
 class ChatRequest(BaseModel):
     session_id: str
     message: str
-    # Optional. Blank means use the key the server was started with.
-    api_key: str | None = None
+    api_key: str | None = None   # blank falls back to the server's key
 
 
 def public_state(values):
     """What the debug panel is allowed to see.
 
-    This is a test harness, so it shows the machinery. A production build
-    would not expose gate internals to the browser.
+    This is a test harness and the panel exists to show the machinery
+    working, grounding included. A production build would not put gate
+    internals on the wire.
     """
     gate = values.get("gate") or {}
     ground = values.get("grounding") or {}
@@ -90,6 +91,7 @@ def start():
 
 @app.post("/api/chat")
 def chat(req: ChatRequest):
+    """One turn of a call: the caller's message in, the agent's reply out."""
     if not req.message.strip():
         raise HTTPException(400, "Message is empty.")
 
@@ -103,8 +105,7 @@ def chat(req: ChatRequest):
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:
-        # Rate limits and malformed model responses should not take the
-        # page down mid-demo.
+        # Rate limits and bad model replies become a 503 the page can show.
         raise HTTPException(503, f"The model call failed: {exc}") from exc
     finally:
         CURRENT_KEY.reset(token)
@@ -125,9 +126,10 @@ def state(session_id: str):
 
 @app.get("/healthz")
 def healthz():
+    """Enough for the page to tell the tester whether they need their own key."""
     return {
         "ok": True,
-        "model": os.getenv("SOP_MODEL", "gemini-3.5-flash-lite"),
+        "model": os.getenv("SOP_MODEL", DEFAULT_MODEL),
         "server_key_set": bool(os.getenv("GEMINI_API_KEY")),
         "consent_scenario": os.getenv("SOP_CONSENT_SCENARIO", "default"),
     }
@@ -136,6 +138,9 @@ def healthz():
 @app.get("/")
 def index():
     return FileResponse(STATIC / "index.html")
+
+
+# Mounted last so the routes above keep priority.
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")

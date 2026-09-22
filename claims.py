@@ -1,13 +1,6 @@
-"""Find which claim the caller is asking about.
+"""Works out which claim the caller is asking about."""
 
-Pure Python. The LLM supplies hints from messy speech; this file decides
-which claim they point to, or reports that it cannot tell yet.
-"""
-
-import json
-from pathlib import Path
-
-FIXTURES = Path(__file__).parent / "insurance_claims" /"fixtures"
+from fixtures import load
 
 MONTHS = {
     "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
@@ -17,8 +10,7 @@ MONTHS = {
 
 
 def load_claims():
-    with open(FIXTURES / "claims.json") as f:
-        return json.load(f)
+    return load("claims.json")
 
 
 def claims_for(party_id):
@@ -28,54 +20,54 @@ def claims_for(party_id):
 
 
 def _period_matches(created_at, period):
-    """created_at is YYYY-MM-DD. period may be '2026-01', 'january', or None."""
+    """Test a YYYY-MM-DD date against a period such as '2026-01' or 'january'.
+
+    Anything unparseable counts as no constraint.
+    """
     if not period:
         return True
     p = str(period).strip().lower()
 
-    if len(p) == 7 and p[4] == "-":           # '2026-01'
+    if len(p) == 7 and p[4] == "-":
         return created_at.startswith(p)
-
-    month = MONTHS.get(p)
-    if month:                                  # month name, year unknown
-        return int(created_at[5:7]) == month
-
-    if p.isdigit() and len(p) == 4:            # '2026'
+    if p.isdigit() and len(p) == 4:
         return created_at.startswith(p)
+    if p in MONTHS:
+        return int(created_at[5:7]) == MONTHS[p]
+    return True
 
-    return True                                # unparseable, ignore it
+
+FILTERS = [
+    ("case_type", lambda claim, want: claim["case_type"] == want),
+    ("status", lambda claim, want: claim["status"] == want),
+    ("period", lambda claim, want: _period_matches(claim["created_at"], want)),
+]
 
 
 def find(party_id, hints):
-    """Narrow this person's claims using whatever the caller told us.
+    """Narrow this person's claims by case_id, case_type, status and period.
 
-    hints keys, all optional: case_id, case_type, status, period.
-
-    Returns (matches, used) -- the surviving claims and which hints
-    actually did the narrowing.
+    A hint that would leave nothing is skipped instead of applied, so a
+    misremembered month still returns the caller's claims. Returns the
+    surviving claims and the hints that actually narrowed them.
     """
     rows = claims_for(party_id)
-    used = []
 
     if hints.get("case_id"):
-        exact = [c for c in rows if c["case_id"].lower() == hints["case_id"].lower()]
+        wanted = str(hints["case_id"]).lower()
+        exact = [c for c in rows if c["case_id"].lower() == wanted]
         if exact:
             return exact, ["case_id"]
 
-    if hints.get("case_type"):
-        narrowed = [c for c in rows if c["case_type"] == hints["case_type"]]
+    used = []
+    for key, keep in FILTERS:
+        want = hints.get(key)
+        if not want:
+            continue
+        narrowed = [c for c in rows if keep(c, want)]
         if narrowed:
-            rows, _ = narrowed, used.append("case_type")
-
-    if hints.get("status"):
-        narrowed = [c for c in rows if c["status"] == hints["status"]]
-        if narrowed:
-            rows, _ = narrowed, used.append("status")
-
-    if hints.get("period"):
-        narrowed = [c for c in rows if _period_matches(c["created_at"], hints["period"])]
-        if narrowed:
-            rows, _ = narrowed, used.append("period")
+            rows = narrowed
+            used.append(key)
 
     return rows, used
 
@@ -84,17 +76,17 @@ def get(case_id):
     """One claim by id, or None."""
     if not case_id:
         return None
+    wanted = str(case_id).lower()
     for c in load_claims():
-        if c["case_id"].lower() == str(case_id).lower():
+        if c["case_id"].lower() == wanted:
             return c
     return None
 
 
 def summary_view(claim):
-    """The safe subset for disambiguation.
+    """The fields safe to read out while the caller is still choosing a claim.
 
-    No denial_reason, no amounts, no documents_needed. Those belong to
-    PROCESS_CASE, after the caller has picked a claim.
+    Denial reasons, amounts and outstanding documents belong to PROCESS_CASE.
     """
     return {
         "case_id": claim["case_id"],
@@ -105,7 +97,11 @@ def summary_view(claim):
 
 
 def contradicts(request, case_id):
+    """True if this turn describes a claim other than the one pinned.
 
+    Catches the implicit switch, where "my auto claim" names a type that
+    does not belong to the claim under discussion.
+    """
     claim = get(case_id)
     if not claim:
         return False
@@ -113,11 +109,8 @@ def contradicts(request, case_id):
     wanted_id = request.get("case_id")
     if wanted_id and str(wanted_id).upper() != claim["case_id"].upper():
         return True
-
     if request.get("case_type") and request["case_type"] != claim["case_type"]:
         return True
-
     if request.get("status") and request["status"] != claim["status"]:
         return True
-
     return False

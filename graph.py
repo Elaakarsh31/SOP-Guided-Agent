@@ -1,3 +1,5 @@
+"""The SOP wired up as a graph, plus the state a fresh call starts from."""
+
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
@@ -12,27 +14,21 @@ GREETING = (
 
 
 def route(state: AgentState) -> str:
-    """Pick the handler for this turn. Phase decides -- never the model.
+    """Pick the handler for this turn from the phase in state.
 
-    The scope guard runs before any phase handler, so an off-topic message
-    cannot be mistaken for an identity answer or a claim question.
+    A request for a person and an off-topic message both short-circuit the
+    phase handlers, from anywhere in the call.
     """
-    # A request for a person ends the automated call, from any phase.
-    if state.get("wants_human"):
-        return "respond"
-    if state.get("offtopic"):
+    if state.get("wants_human") or state.get("offtopic"):
         return "respond"
 
     if state["phase"] == "VERIFY_ID":
         return "verify"
     if state["phase"] == "RESOLVE_INTENT":
         return "resolve_intent"
-    # A caller working one claim can ask for another. Send them back through
-    # selection rather than leaving the old claim pinned.
-    if state["phase"] == "PROCESS_CASE" and state.get("switch_requested"):
-        return "resolve_intent"
     if state["phase"] == "PROCESS_CASE":
-        # A caller who says they are done moves to the closing offer.
+        if state.get("switch_requested"):
+            return "resolve_intent"
         return "post_process" if state.get("wrap_up") else "process_case"
     if state["phase"] == "POST_PROCESS":
         return "post_process"
@@ -40,6 +36,11 @@ def route(state: AgentState) -> str:
 
 
 def build_graph():
+    """Assemble the SOP graph.
+
+    Every turn starts at extract and ends at respond; route() decides what
+    happens in between.
+    """
     g = StateGraph(AgentState)
 
     g.add_node("extract", extract)
@@ -54,16 +55,12 @@ def build_graph():
                             ["verify", "resolve_intent", "process_case",
                              "post_process", "respond"])
 
-    # Verification that clears this turn falls straight through to intent
-    # resolution, so the caller is not made to repeat what they already said.
+    # A step completing this turn falls through, so nothing is repeated.
     g.add_conditional_edges(
         "verify",
         lambda s: "resolve_intent" if s["phase"] == "RESOLVE_INTENT" else "respond",
         ["resolve_intent", "respond"],
     )
-
-    # A claim pinned this turn falls straight through to answering, so the
-    # caller is not told to hold for a lookup that has already happened.
     g.add_conditional_edges(
         "resolve_intent",
         lambda s: "process_case" if s.get("case_id") else "respond",
@@ -77,6 +74,7 @@ def build_graph():
 
 
 def initial_state():
+    """A blank call, with every key set so no node has to guess a default."""
     return {
         "phase": "VERIFY_ID",
         "party_id": None,

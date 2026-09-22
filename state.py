@@ -1,3 +1,9 @@
+"""Shared state, and the shapes the extractor fills in.
+
+The Field descriptions on the models below are part of the extraction
+prompt, so changing their wording changes what the model returns.
+"""
+
 from typing import Annotated, Literal, Optional, Sequence
 
 from langchain_core.messages import BaseMessage
@@ -5,9 +11,8 @@ from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
-# These labels must match the intent_hints values in
-# fixtures/required_document_guideline.json exactly, or PROCESS_CASE will
-# match no guidance rows and silently fall back to generic wording.
+# Must stay in step with the intent_hints values in
+# fixtures/required_document_guideline.json.
 INTENTS = Literal[
     "denial_question",
     "status_inquiry",
@@ -20,60 +25,58 @@ INTENTS = Literal[
 
 
 class AgentState(TypedDict):
+    """Everything carried between turns of one call.
+
+    Fields marked turn-scoped are rewritten by extract() every turn; the
+    rest accumulate. authorized and consent_status are separate questions:
+    an unauthorised caller is never asked for consent, so consent_status
+    stays None.
+    """
+
     messages: Annotated[Sequence[BaseMessage], add_messages]
     phase: Literal["VERIFY_ID", "RESOLVE_INTENT", "PROCESS_CASE", "POST_PROCESS"]
 
-    # --- identity ---
-    party_id: Optional[str]      # pinned on first match; scoring never drifts
-    claimed: dict                # accumulates across turns
+    party_id: Optional[str]
+    claimed: dict
     verified: bool
-    gate: dict                   # rebuilt each turn by verify; field names only
+    gate: dict
 
-    # --- third-party callers ---
-    caller_role: Optional[str]        # "self" | "representative"
-    rep_name: Optional[str]           # the caller's own name, when acting for someone
-    relationship: Optional[str]       # from the representative record, once matched
-
-    # Two separate questions, deliberately two keys. If authorized is False we
-    # never asked for consent at all, so consent_status stays None.
-    authorized: Optional[bool]        # on the policyholder's representative list?
-    consent_status: Optional[str]     # pending | approved | timeout | denied
+    caller_role: Optional[str]
+    rep_name: Optional[str]
+    relationship: Optional[str]
+    authorized: Optional[bool]
+    consent_status: Optional[str]
     consent_polls: int
-    unauthorized_turns: int           # how often we have explained the dead end
-    bad_attempts: int                 # details given that did not match
+    unauthorized_turns: int
+    bad_attempts: int
 
-    # --- parked memory ---
-    # Written from ANY phase. Callers state why they are calling long before
-    # they are verified, and that has to survive until RESOLVE_INTENT.
+    # Written from any phase, since callers state their business before verifying.
     hints: dict
 
-    # --- case ---
     intent: Optional[str]
     case_id: Optional[str]
-    switch_requested: bool       # turn-scoped: caller wants a different claim
-    discussed: list              # intents covered, for the closing summary
-    offtopic: bool               # turn-scoped: this message is out of scope
-    offtopic_strikes: int        # consecutive off-topic turns
+    switch_requested: bool       # turn-scoped
+    discussed: list
+    offtopic: bool               # turn-scoped
+    offtopic_strikes: int
 
-    # --- how the call is going ---
     emotion: Optional[str]
     refusing: bool
     friction: int                # consecutive difficult turns behind a gate
 
-    # --- closing ---
-    wrap_up: bool                # turn-scoped: caller signalled they are done
-    wants_human: bool            # caller asked for a person; terminal
+    wrap_up: bool                # turn-scoped
+    wants_human: bool
     email_offered: bool
-    email_choice: Optional[str]  # "send" | "skip"
+    email_choice: Optional[str]
     email_sent: bool
     closed: bool
 
-    # --- the only channel through which record data reaches the model ---
+    # The only key through which record data reaches the responder.
     grounding: dict
 
 
 class Identity(BaseModel):
-    """Details belonging to the POLICYHOLDER, whoever is on the phone."""
+    """Verification details, always the policyholder's, never the caller's."""
 
     full_name: Optional[str] = Field(
         None, description="The POLICYHOLDER's full name as spoken. If someone is "
@@ -103,7 +106,7 @@ class Identity(BaseModel):
 
 
 class Caller(BaseModel):
-    """Who is actually on the phone, as distinct from whose policy it is."""
+    """Who is on the phone, as opposed to whose policy it is."""
 
     caller_role: Optional[Literal["self", "representative"]] = Field(
         None, description="'representative' if calling on someone else's behalf "
@@ -120,7 +123,7 @@ class Caller(BaseModel):
 
 
 class Mood(BaseModel):
-    """How the caller sounds. Read from their words, not assumed."""
+    """How the caller sounds, judged from their wording."""
 
     emotion: Optional[Literal["calm", "frustrated", "angry", "anxious",
                               "confused", "upset"]] = Field(
@@ -194,11 +197,7 @@ class Request(BaseModel):
 
 
 class Extraction(BaseModel):
-    """Everything worth pulling out of one caller message.
-
-    One call, three sections. The nesting decides where each field lands in
-    state, so a field cannot silently end up in the wrong dict.
-    """
+    """One model call, five sections, each copied into its own part of state."""
 
     identity: Identity = Field(default_factory=Identity)
     caller: Caller = Field(default_factory=Caller)

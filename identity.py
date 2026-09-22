@@ -1,28 +1,30 @@
-"""Check what the caller told us against the policyholder records."""
+"""Checks the details a caller gives against the policyholder records."""
 
-import json
 import re
-from pathlib import Path
 
-FIXTURES = Path(__file__).parent / "insurance_claims" /"fixtures"
+from fixtures import load
 
-# Fields that count toward the 3-field requirement.
-# policy_number is not here on purpose: it is printed on every letter,
-# so it proves nothing about who is calling.
+# policy_number is excluded: it is printed on every letter we send.
 FIELDS = ["full_name", "dob", "phone", "email", "id_last4"]
 REQUIRED = 3
 
+RECORD_COLUMN = {"full_name": "name"}
+
 
 def load_people():
-    with open(FIXTURES / "policyholders.json") as f:
-        return json.load(f)
+    return load("policyholders.json")
 
 
 def clean(field, value):
-    """Make a value comparable. Returns None if it is unusable."""
+    """Reduce a value to a comparable form, or None if it is unusable.
+
+    Both the record and the spoken answer go through here so they meet in
+    the middle.
+    """
     if not value:
         return None
     v = str(value).strip()
+
     if field == "full_name":
         v = re.sub(r"[^a-z ]", "", v.lower())
         return re.sub(r"\s+", " ", v).strip() or None
@@ -40,31 +42,30 @@ def clean(field, value):
 
 
 def accepted(person, field):
-    """Every value this person could correctly give for this field.
-    Most fields have one. Names and emails can have aliases."""
-    values = {
-        "full_name": [person["name"]] + person.get("name_aliases", []),
-        "email": [person["email"]] + person.get("email_aliases", []),
-        "phone": [person["phone"]] + person.get("phone_aliases", []),
-        "dob": [person["dob"]],
-        "id_last4": [person["id_last4"]],
-    }[field]
+    """Every value this person could correctly give for one field.
+
+    Names, emails and phone numbers may carry aliases on the record.
+    """
+    column = RECORD_COLUMN.get(field, field)
+    values = [person[column], *person.get(f"{column}_aliases", [])]
     return {clean(field, v) for v in values}
 
 
 def matching_fields(person, claimed):
-    """Which of the caller's answers are correct for this person."""
-    return [f for f in FIELDS
-            if clean(f, claimed.get(f)) is not None
-            and clean(f, claimed.get(f)) in accepted(person, f)]
+    """Which of the caller's answers are right for this person."""
+    hits = []
+    for field in FIELDS:
+        value = clean(field, claimed.get(field))
+        if value is not None and value in accepted(person, field):
+            hits.append(field)
+    return hits
 
 
 def check(claimed, party_id=None):
-    """Decide where verification stands.
+    """Score the details given so far and report where verification stands.
 
-    party_id is set once we know who we are talking to. After that we only
-    check that one person, so three answers borrowed from three different
-    policyholders can never add up to a verified caller.
+    Once party_id is set we score against that record alone, so answers
+    borrowed from several policyholders cannot add up to a verified caller.
     """
     people = load_people()
     if party_id:
@@ -76,11 +77,7 @@ def check(claimed, party_id=None):
         if len(fields) > len(matched):
             best, matched = person, fields
 
-    # Fields the caller gave that did not match. A wrong value is a signal,
-    # not just a non-event -- the caller needs to know something is off, and
-    # repeated misses should end the call rather than loop forever.
-    mismatched = [f for f in FIELDS
-                  if claimed.get(f) and f not in matched]
+    mismatched = [f for f in FIELDS if claimed.get(f) and f not in matched]
 
     return {
         "party_id": best["party_id"] if best else party_id,

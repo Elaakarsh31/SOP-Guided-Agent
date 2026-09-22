@@ -1,8 +1,7 @@
-"""End-of-call summary: what to put in it, and the send step.
+"""Builds and sends the end-of-call summary.
 
-The payload is assembled from state and the claim record. The model writes
-the wording from that payload and nothing else, so the summary cannot
-contain a fact the call did not establish.
+build() assembles the payload from state and the claim record; the model is
+given that payload and nothing else.
 """
 
 import json
@@ -12,8 +11,6 @@ from pathlib import Path
 import claims
 import identity
 
-# Where simulated sends are recorded. There is no mail server in this demo;
-# writing the payload to disk keeps the step honest and inspectable.
 OUTBOX = Path(__file__).parent / "outbox"
 
 TOPIC_LABELS = {
@@ -26,10 +23,10 @@ TOPIC_LABELS = {
 
 
 def recipient(state):
-    """Always the policyholder on file, never an address the caller gave.
+    """The address on the policy, whoever made the call.
 
-    A representative gets the call summarised to the person whose claim it
-    is, not to themselves.
+    A representative gets the call summarised to the policyholder, so the
+    summary cannot redirect claim details to an address the caller supplied.
     """
     who = identity.person(state.get("party_id"))
     if not who:
@@ -38,16 +35,15 @@ def recipient(state):
 
 
 def build(state):
-    """The facts the summary may contain. Returns None if there is no claim."""
+    """Gather the facts the summary may contain, or None if no claim was pinned."""
     claim = claims.get(state.get("case_id"))
     if not claim:
         return None
 
-    to = recipient(state)
     discussed = [TOPIC_LABELS.get(t, t) for t in state.get("discussed", [])]
 
     payload = {
-        "to": to,
+        "to": recipient(state),
         "case_id": claim["case_id"],
         "case_type": claim["case_type"],
         "status": claim["status"],
@@ -80,13 +76,36 @@ def build(state):
     return payload
 
 
+def email_body(payload):
+    """Render the payload as the plain-text email.
+
+    Written here rather than by the model so what lands in the caller's
+    inbox is predictable.
+    """
+    lines = [
+        f"Summary of your call about claim {payload['case_id']}",
+        "",
+        f"Claim: {payload['case_id']} ({payload['case_type']}, "
+        f"filed {payload['filed']})",
+        f"Status: {payload['status']}",
+        f"Outcome: {payload['outcome']}",
+        "",
+        "What we discussed: " + ", ".join(payload["discussed"]),
+    ]
+    if payload.get("next_steps"):
+        lines += ["", "Next steps:"] + [f"  - {s}" for s in payload["next_steps"]]
+    if payload.get("spoke_with"):
+        lines += ["", f"Call handled with {payload['spoke_with']} on your behalf."]
+    return "\n".join(lines)
+
+
 def send(payload, body):
     """Simulated send. Writes the message to outbox/ and returns a receipt."""
-    OUTBOX.mkdir(exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = OUTBOX / f"{payload['case_id']}-{stamp}.json"
+    OUTBOX.mkdir(parents=True, exist_ok=True)
+    now = datetime.now()
+    path = OUTBOX / f"{payload['case_id']}-{now:%Y%m%d-%H%M%S}.json"
     record = {
-        "sent_at": datetime.now().isoformat(timespec="seconds"),
+        "sent_at": now.isoformat(timespec="seconds"),
         "to": payload["to"],
         "subject": f"Summary of your call about claim {payload['case_id']}",
         "body": body,

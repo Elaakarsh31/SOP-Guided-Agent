@@ -13,7 +13,27 @@ VERIFY_ID  ->  RESOLVE_INTENT  ->  PROCESS_CASE  ->  POST_PROCESS
        alt="Graph diagram: every turn enters at extract and leaves at respond. route() dispatches on the phase in state to one of verify, resolve_intent, process_case or post_process. verify falls through to resolve_intent and resolve_intent to process_case when a step completes on the same turn. A transfer request or an off-topic message bypasses the handlers and goes straight to respond.">
 </picture>
 
-## Running it
+## Try it
+
+**<https://sop-guided-agent.onrender.com/>** — deployed on Render from this
+repo. Open it and start talking; the scripts under
+[Things to try](#things-to-try) walk the whole workflow.
+
+A key is set on the server, so the API key box in the header can stay blank.
+Paste your own if you would rather not spend mine: it is used for that
+browser session only, is never stored, and overrides the server's while it
+is there.
+
+Two things about the free Render tier. The instance sleeps when idle, so the
+first request after a quiet spell takes up to a minute while it wakes —
+after that it is quick. And it runs one fixed consent scenario, `default`,
+where the policyholder approves; the `timeout` and `denied` variants need a
+local run.
+
+Redeploying it is the Dockerfile in this repo plus one environment variable,
+`GEMINI_API_KEY`. Nothing else is configured.
+
+## Running it locally
 
 The agent calls Gemini, so it needs an API key. There are two ways to give
 it one — either is enough.
@@ -106,6 +126,23 @@ appeal deadline; amounts appear only when the caller asks about money.
 
 ## Things to try
 
+**One pass through all four phases.** Four messages, in order, from a cold
+start:
+
+1. `hi, my name is margaret chen, dob march 15 1985, ssn last four 4472` —
+   verification. Three details, one party, the gate opens, and only then does
+   it name the claims on file.
+2. `why was my healthcare claim from january denied?` — intent and claim.
+   Resolves to CL-2048 and answers from approved guidance.
+3. `what do I need to send to appeal it?` — case processing. The document
+   list comes out of the fixture, not the model.
+4. `that's all, thanks` — follow-up. Recap, then an offer to email the
+   summary. Either answer is honoured; `yes please, email it` closes the call
+   and writes the summary to `outbox/`.
+
+The phase strip and state panel on the right show the machinery moving as
+each turn lands. Everything below is a variation on this.
+
 **The demo case, one turn**
 
 > hi, my name is margaret chen, dob march 15 1985, ssn last four 4472. I'm
@@ -130,18 +167,19 @@ it offers a representative instead of repeating itself.
 Treated as a refusal rather than an argument: the agent explains the reason
 once and moves to a different detail. It never insists on the one refused.
 
-**A representative**
-
-```bash
-SOP_CONSENT_SCENARIO=default python app.py
-```
+**A representative** (the hosted demo runs the `default` scenario, so this
+works there as written)
 
 > hi I'm david chen, calling for my mother margaret chen. her dob is
 > 1985-03-15, ssn 4472, email margaret@email.com
 
 Identity passes, consent is requested, and access opens only when the
-policyholder approves. Run with `SOP_CONSENT_SCENARIO=timeout` to see it
-escalate to a human instead, or `denied` to see a refusal.
+policyholder approves. Locally, `SOP_CONSENT_SCENARIO=timeout` shows it
+escalate to a human instead and `denied` shows a refusal:
+
+```bash
+SOP_CONSENT_SCENARIO=timeout uvicorn server:app
+```
 
 Someone not on the representative list is stopped even with every correct
 detail.

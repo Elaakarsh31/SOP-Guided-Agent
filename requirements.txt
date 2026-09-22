@@ -1,0 +1,11 @@
+langchain_community
+langchain_google_genai
+langchain_openai
+langchain_chroma
+langgraph
+pydantic
+pypdf
+pyyaml
+PyYAML>=6.0
+fastapi>=0.110
+uvicorn[standard]>=0.29

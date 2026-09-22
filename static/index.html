@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claims line — SOP agent test harness</title>
+<style>
+  :root {
+    --ink:       #1b2430;
+    --ink-soft:  #5a6673;
+    --paper:     #eceef0;
+    --card:      #ffffff;
+    --rule:      #ccd2d8;
+    --hold:      #b06a1f;   /* gate closed, waiting */
+    --open:      #2f6b4f;   /* gate passed */
+    --stop:      #9a3324;   /* gate refused */
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  header {
+    padding: 18px 24px 14px;
+    border-bottom: 1px solid var(--rule);
+    background: var(--card);
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  header h1 { margin: 0; font-size: 17px; font-weight: 620; letter-spacing: -.01em; }
+  header p  { margin: 0; color: var(--ink-soft); font-size: 13px; }
+  .keybox {
+    margin-left: auto;
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12.5px; color: var(--ink-soft);
+  }
+  .keybox input {
+    font: inherit; font-size: 12.5px;
+    padding: 5px 9px; width: 260px;
+    border: 1px solid var(--rule); border-radius: 3px;
+    background: var(--card); color: var(--ink);
+  }
+  #keynote { font-size: 12px; }
+
+  header button {
+    font: inherit; font-size: 13px;
+    padding: 6px 13px;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    background: var(--card);
+    color: var(--ink);
+    cursor: pointer;
+  }
+  header button:hover { border-color: var(--ink-soft); }
+
+  /* ---- phase rail: the SOP itself, made visible ---- */
+  .rail {
+    display: flex;
+    gap: 2px;
+    padding: 0 24px;
+    background: var(--card);
+    border-bottom: 1px solid var(--rule);
+    overflow-x: auto;
+  }
+  .step {
+    padding: 11px 16px 9px;
+    font-size: 12.5px;
+    color: var(--ink-soft);
+    border-bottom: 3px solid transparent;
+    white-space: nowrap;
+  }
+  .step.done    { color: var(--ink); }
+  .step.done::before { content: "✓ "; color: var(--open); }
+  .step.current { color: var(--ink); font-weight: 620; border-bottom-color: var(--ink); }
+
+  main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 340px;
+    gap: 20px;
+    padding: 20px 24px 24px;
+    align-items: start;
+    max-width: 1180px;
+    margin: 0 auto;
+  }
+
+  /* ---- conversation ---- */
+  .talk {
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 210px);
+    min-height: 380px;
+  }
+  .log { flex: 1; overflow-y: auto; padding: 18px 20px; }
+  .turn { margin-bottom: 15px; max-width: 74ch; }
+  .who  { font-size: 11.5px; color: var(--ink-soft); margin-bottom: 3px; }
+  .turn.you { margin-left: auto; text-align: right; }
+  .turn.you .bubble {
+    background: var(--ink); color: #fff;
+    border-radius: 4px 4px 1px 4px;
+  }
+  .bubble {
+    display: inline-block;
+    padding: 9px 13px;
+    background: var(--paper);
+    border-radius: 4px 4px 4px 1px;
+    white-space: pre-wrap;
+    text-align: left;
+  }
+  .turn.err .bubble { background: #f6e7e4; color: var(--stop); }
+
+  form {
+    display: flex; gap: 9px;
+    padding: 12px; border-top: 1px solid var(--rule);
+  }
+  input[type=text] {
+    flex: 1; font: inherit;
+    padding: 9px 11px;
+    border: 1px solid var(--rule); border-radius: 3px;
+    background: var(--card); color: var(--ink);
+  }
+  input[type=text]:focus, button:focus-visible {
+    outline: 2px solid var(--ink); outline-offset: 1px;
+  }
+  form button {
+    font: inherit; padding: 9px 18px;
+    border: 0; border-radius: 3px;
+    background: var(--ink); color: #fff; cursor: pointer;
+  }
+  form button:disabled { background: var(--ink-soft); cursor: default; }
+
+  /* ---- state instrument ---- */
+  .panel {
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: 16px 18px;
+    position: sticky; top: 20px;
+  }
+  .panel h2 {
+    margin: 0 0 4px; font-size: 13px; font-weight: 620;
+  }
+  .panel .sub { margin: 0 0 14px; font-size: 12px; color: var(--ink-soft); }
+
+  .gate {
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--hold);
+    border-radius: 3px;
+    padding: 9px 11px;
+    margin-bottom: 12px;
+  }
+  .gate.pass { border-left-color: var(--open); }
+  .gate.stop { border-left-color: var(--stop); }
+  .gate .label { font-size: 12px; color: var(--ink-soft); }
+  .gate .value { font-size: 13.5px; }
+
+  dl { margin: 0; font-size: 12.5px; }
+  dl div {
+    display: grid; grid-template-columns: 96px minmax(0, 1fr);
+    gap: 8px; padding: 4px 0;
+    border-top: 1px solid var(--rule);
+  }
+  dt { color: var(--ink-soft); }
+  dd {
+    margin: 0; overflow-wrap: anywhere;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+  }
+  dd.none { color: var(--ink-soft); font-family: inherit; font-size: 12.5px; }
+
+  @media (max-width: 860px) {
+    main { grid-template-columns: 1fr; }
+    .talk { height: 62vh; }
+    .panel { position: static; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Claims line</h1>
+  <p>SOP agent test harness · fixture data only</p>
+  <div class="keybox">
+    <label for="key">Gemini API key</label>
+    <input id="key" type="password" autocomplete="off"
+           placeholder="optional — leave blank to use the server's key">
+    <span id="keynote"></span>
+  </div>
+  <button id="restart" type="button">Start a new call</button>
+</header>
+
+<div class="rail" id="rail"></div>
+
+<main>
+  <section class="talk">
+    <div class="log" id="log" aria-live="polite"></div>
+    <form id="form">
+      <input id="msg" type="text" autocomplete="off"
+             placeholder="Type what the caller says" aria-label="Caller message">
+      <button id="send" type="submit">Send</button>
+    </form>
+  </section>
+
+  <aside class="panel">
+    <h2>What the agent knows</h2>
+    <p class="sub">Updated after every turn.</p>
+    <div id="gates"></div>
+    <dl id="facts"></dl>
+  </aside>
+</main>
+
+<script>
+const PHASES = [
+  ["VERIFY_ID", "Verify identity"],
+  ["RESOLVE_INTENT", "Find the claim"],
+  ["PROCESS_CASE", "Answer questions"],
+  ["POST_PROCESS", "Close the call"],
+];
+
+let session = null;
+let busy = false;
+
+const $ = id => document.getElementById(id);
+
+function turn(who, text, cls) {
+  const wrap = document.createElement("div");
+  wrap.className = "turn " + (cls || who);
+  wrap.innerHTML = `<div class="who"></div><div class="bubble"></div>`;
+  wrap.querySelector(".who").textContent = who === "you" ? "Caller" : "Agent";
+  wrap.querySelector(".bubble").textContent = text;
+  $("log").append(wrap);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+function drawRail(phase) {
+  const at = PHASES.findIndex(p => p[0] === phase);
+  $("rail").innerHTML = "";
+  PHASES.forEach(([key, label], i) => {
+    const el = document.createElement("div");
+    el.className = "step" + (i === at ? " current" : i < at ? " done" : "");
+    el.textContent = label;
+    $("rail").append(el);
+  });
+}
+
+function gate(label, value, tone) {
+  return `<div class="gate ${tone}">
+            <div class="label">${label}</div>
+            <div class="value">${value}</div>
+          </div>`;
+}
+
+function row(dl, key, value) {
+  const empty = value === null || value === undefined || value === "" ||
+                (Array.isArray(value) && !value.length) ||
+                (typeof value === "object" && !Array.isArray(value) &&
+                 !Object.keys(value).length);
+  const text = empty ? "not yet"
+    : Array.isArray(value) ? value.join(", ")
+    : typeof value === "object" ? JSON.stringify(value)
+    : String(value);
+  const d = document.createElement("div");
+  d.innerHTML = `<dt></dt><dd class="${empty ? "none" : ""}"></dd>`;
+  d.querySelector("dt").textContent = key;
+  d.querySelector("dd").textContent = text;
+  dl.append(d);
+}
+
+function draw(s) {
+  drawRail(s.phase);
+
+  let html = gate(
+    "Identity",
+    s.verified ? `confirmed · ${s.matched.length} details matched`
+               : `${s.matched.length} of 3 matched`,
+    s.verified ? "pass" : "");
+
+  if (s.caller_role === "representative") {
+    html += gate(
+      "Authorisation",
+      s.authorized === false ? "not on the policy"
+        : s.authorized ? "listed representative" : "checking",
+      s.authorized === false ? "stop" : s.authorized ? "pass" : "");
+    html += gate(
+      "Policyholder consent",
+      s.consent_status
+        ? `${s.consent_status} · asked ${s.consent_polls}×`
+        : "not requested",
+      s.consent_status === "approved" ? "pass"
+        : ["timeout", "denied"].includes(s.consent_status) ? "stop" : "");
+  }
+  $("gates").innerHTML = html;
+
+  const dl = $("facts");
+  dl.innerHTML = "";
+  row(dl, "Policyholder", s.party_id);
+  row(dl, "Confirmed", s.matched);
+  row(dl, "Still needed", s.verified ? [] : s.still_needed);
+  if (s.caller_role === "representative") row(dl, "Calling", s.rep_name);
+  row(dl, "Remembered", s.hints);
+  row(dl, "Claim", s.case_id);
+  row(dl, "Asking about", s.intent);
+  row(dl, "Covered", s.discussed);
+  if (s.offtopic_strikes) row(dl, "Off topic", s.offtopic_strikes + " in a row");
+  if (s.email_offered) {
+    row(dl, "Summary email", s.email_sent ? "sent"
+      : s.email_choice === "skip" ? "declined" : "offered");
+  }
+  row(dl, "Agent may use", s.grounding_keys);
+}
+
+async function post(url, body) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body || {}),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+}
+
+async function startCall() {
+  $("log").innerHTML = "";
+  $("gates").innerHTML = "";
+  $("facts").innerHTML = "";
+  drawRail("VERIFY_ID");
+  try {
+    const d = await post("/api/start");
+    session = d.session_id;
+    turn("agent", d.greeting);
+    draw(await (await fetch("/api/state/" + session)).json());
+  } catch (e) {
+    turn("agent", "Could not start a call: " + e.message, "err");
+  }
+}
+
+$("form").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const text = $("msg").value.trim();
+  if (!text || busy || !session) return;
+
+  turn("you", text);
+  $("msg").value = "";
+  busy = true;
+  $("send").disabled = true;
+  $("send").textContent = "…";
+
+  try {
+    const d = await post("/api/chat", {
+      session_id: session,
+      message: text,
+      api_key: $("key").value.trim() || null,
+    });
+    turn("agent", d.reply);
+    $("keynote").textContent = d.key_source === "yours" ? "using your key" : "using the server key";
+    $("keynote").style.color = "";
+    draw(d.state);
+  } catch (e) {
+    turn("agent", e.message, "err");
+  } finally {
+    busy = false;
+    $("send").disabled = false;
+    $("send").textContent = "Send";
+    $("msg").focus();
+  }
+});
+
+$("restart").addEventListener("click", startCall);
+
+// Tell the tester whether they need to supply a key at all.
+fetch("/healthz").then(r => r.json()).then(h => {
+  $("keynote").textContent = h.server_key_set
+    ? "server key available"
+    : "required — no key on the server";
+  if (!h.server_key_set) $("keynote").style.color = "var(--hold)";
+}).catch(() => {});
+
+startCall();
+</script>
+</body>
+</html>

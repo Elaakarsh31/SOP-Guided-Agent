@@ -50,14 +50,6 @@ docker run -p 8000:8000 sop-agent
 Terminal version, same agent: `python app.py`. `/state` dumps what the agent
 has worked out, `/ground` dumps the grounding it was handed last turn.
 
-Logic tests need no API key:
-
-```bash
-python test_identity.py
-python test_claims.py
-python test_consent.py
-```
-
 ## The design
 
 **The model never decides control flow.** Phase order, gates and allowed
@@ -81,7 +73,7 @@ letter, so it does not count toward the three required details.
 **Three details must belong to one person.** The first match pins a party and
 every later detail is checked against that party alone. A name from one
 policyholder, a date of birth from another and an ID from a third is not an
-identity — `test_identity.py` asserts this.
+identity.
 
 **A confirmed detail cannot be un-confirmed.** Matched fields are locked, so
 nothing later in the call can overwrite one and flip verification back off.
